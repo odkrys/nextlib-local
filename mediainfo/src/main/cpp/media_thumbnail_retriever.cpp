@@ -161,6 +161,100 @@ static jobject frame_to_bitmap(JNIEnv *env, const AVFrame *frame) {
     return bitmap;
 }
 
+static jobject frame_to_bitmap_req(JNIEnv *env, const AVFrame *frame, int dstWidth = 0, int dstHeight = 0) {
+    if (!frame || frame->width <= 0 || frame->height <= 0) {
+        return nullptr;
+    }
+
+    if (dstWidth > frame->width) dstWidth = frame->width;
+    if (dstHeight > frame->height) dstHeight = frame->height;
+
+    int outWidth, outHeight;
+    if (dstWidth > 0 && dstHeight == 0) {
+        outWidth = dstWidth;
+        outHeight = (int)((float)frame->height / frame->width * dstWidth);
+    } else if (dstWidth == 0 && dstHeight > 0) {
+        outHeight = dstHeight;
+        outWidth = (int)((float)frame->width / frame->height * dstHeight);
+    } else if (dstWidth > 0 && dstHeight > 0) {
+        outWidth = dstWidth;
+        outHeight = dstHeight;
+    } else {
+        outWidth = frame->width;
+        outHeight = frame->height;
+    }
+
+    outWidth = (outWidth + 1) & ~1;
+    outHeight = (outHeight + 1) & ~1;
+
+    jobject bitmap = create_bitmap(env, outWidth, outHeight);
+    if (!bitmap) {
+        return nullptr;
+    }
+
+    AndroidBitmapInfo bitmapInfo;
+    if (AndroidBitmap_getInfo(env, bitmap, &bitmapInfo) < 0) {
+        env->DeleteLocalRef(bitmap);
+        return nullptr;
+    }
+
+    void *bitmapPixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &bitmapPixels) < 0 || !bitmapPixels) {
+        env->DeleteLocalRef(bitmap);
+        return nullptr;
+    }
+
+    SwsContext *swsContext = sws_getContext(
+            frame->width,
+            frame->height,
+            static_cast<AVPixelFormat>(frame->format),
+            outWidth,
+            outHeight,
+            AV_PIX_FMT_RGBA,
+            SWS_BILINEAR,
+            nullptr,
+            nullptr,
+            nullptr);
+
+    if (!swsContext) {
+        AndroidBitmap_unlockPixels(env, bitmap);
+        env->DeleteLocalRef(bitmap);
+        return nullptr;
+    }
+
+    AVFrame *outputFrame = av_frame_alloc();
+    if (!outputFrame) {
+        sws_freeContext(swsContext);
+        AndroidBitmap_unlockPixels(env, bitmap);
+        env->DeleteLocalRef(bitmap);
+        return nullptr;
+    }
+
+    av_image_fill_arrays(
+            outputFrame->data,
+            outputFrame->linesize,
+            static_cast<uint8_t *>(bitmapPixels),
+            AV_PIX_FMT_RGBA,
+            outWidth,
+            outHeight,
+            1);
+
+    sws_scale(
+            swsContext,
+            frame->data,
+            frame->linesize,
+            0,
+            frame->height,
+            outputFrame->data,
+            outputFrame->linesize);
+
+    av_frame_free(&outputFrame);
+    sws_freeContext(swsContext);
+    AndroidBitmap_unlockPixels(env, bitmap);
+
+    return bitmap;
+}
+
 static AVCodecContext *create_decoder_context(MediaThumbnailRetrieverContext *context) {
     if (!context || !context->formatContext || context->videoStreamIndex < 0) {
         return nullptr;
@@ -262,6 +356,58 @@ static jobject decode_frame_at_time(JNIEnv *env, MediaThumbnailRetrieverContext 
     return result;
 }
 
+static jobject decode_frame_at_time_req(JNIEnv *env, MediaThumbnailRetrieverContext *context, int64_t timeUs, int dstWidth = 0, int dstHeight = 0) {
+    AVCodecContext *codecContext = create_decoder_context(context);
+    if (!codecContext) {
+        return nullptr;
+    }
+
+    AVStream *videoStream = context->formatContext->streams[context->videoStreamIndex];
+    int64_t targetTimestamp = av_rescale_q(timeUs, AV_TIME_BASE_Q, videoStream->time_base);
+
+    int idxCount = avformat_index_get_entries_count(videoStream);
+    const char *formatName = context->formatContext->iformat->name;
+    bool isMp4Based = strstr(formatName, "mp4") != nullptr
+                      || strstr(formatName, "mov") != nullptr
+                      || strstr(formatName, "m4a") != nullptr;
+
+    if (isMp4Based && idxCount > 0) {
+        const AVIndexEntry *lastEntry = avformat_index_get_entry(videoStream, idxCount - 1);
+        if (lastEntry && targetTimestamp > lastEntry->timestamp) {
+            avcodec_free_context(&codecContext);
+            return nullptr;
+        }
+    }
+
+    int seekResult = av_seek_frame(context->formatContext, context->videoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
+    if (seekResult < 0) {
+        // Failed to seek to the requested timestamp; clean up and return null.
+        avcodec_free_context(&codecContext);
+        return nullptr;
+    }
+    avcodec_flush_buffers(codecContext);
+
+    AVPacket *packet = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    if (!packet || !frame) {
+        av_packet_free(&packet);
+        av_frame_free(&frame);
+        avcodec_free_context(&codecContext);
+        return nullptr;
+    }
+
+    jobject result = nullptr;
+    if (decode_next_frame(context, codecContext, packet, frame)) {
+        result = frame_to_bitmap_req(env, frame, dstWidth, dstHeight);
+    }
+
+    av_packet_free(&packet);
+    av_frame_free(&frame);
+    avcodec_free_context(&codecContext);
+
+    return result;
+}
+
 static jobject decode_frame_at_index(JNIEnv *env, MediaThumbnailRetrieverContext *context, int frameIndex) {
     AVCodecContext *codecContext = create_decoder_context(context);
     if (!codecContext) {
@@ -348,6 +494,54 @@ static jlong create_context_from_source(const char *source) {
     return handle_from_context(context);
 }
 
+static jlong create_context_from_url(const char *url, const char *headers) {
+    AVDictionary *options = nullptr;
+
+    if (headers && strlen(headers) > 0) {
+        av_dict_set(&options, "headers", headers, 0);
+    }
+    av_dict_set(&options, "tls_verify", "0", 0);
+
+    AVFormatContext *formatContext = nullptr;
+    if (!url || avformat_open_input(&formatContext, url, nullptr, &options) < 0) {
+        av_dict_free(&options);
+        return 0;
+    }
+    av_dict_free(&options);
+
+    if (avformat_find_stream_info(formatContext, nullptr) < 0) {
+        avformat_close_input(&formatContext);
+        return 0;
+    }
+
+    int videoStreamIndex = -1;
+    for (unsigned int i = 0; i < formatContext->nb_streams; ++i) {
+        AVStream *stream = formatContext->streams[i];
+        if (!stream || !stream->codecpar) continue;
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
+        if ((stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) continue;
+        videoStreamIndex = static_cast<int>(i);
+        break;
+    }
+
+    if (videoStreamIndex < 0) {
+        videoStreamIndex = av_find_best_stream(formatContext, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    }
+
+    auto *context = reinterpret_cast<MediaThumbnailRetrieverContext *>(malloc(sizeof(MediaThumbnailRetrieverContext)));
+    if (!context) {
+        avformat_close_input(&formatContext);
+        return 0;
+    }
+
+    context->formatContext = formatContext;
+    context->videoStreamIndex = videoStreamIndex;
+    context->rotationDegrees = (videoStreamIndex >= 0)
+                               ? read_rotation_degrees(formatContext->streams[videoStreamIndex])
+                               : 0;
+    return handle_from_context(context);
+}
+
 extern "C"
 JNIEXPORT jlong JNICALL
 Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeCreateFromPath(
@@ -425,6 +619,23 @@ Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeGetF
 
 extern "C"
 JNIEXPORT jobject JNICALL
+Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeGetFrameAtTimeReq(
+        JNIEnv *env,
+        jobject thiz,
+        jlong handle,
+        jlong time_us,
+        jint dst_width,
+        jint dst_height) {
+    auto *context = context_from_handle(handle);
+    if (!context || !context->formatContext || context->videoStreamIndex < 0) {
+        return nullptr;
+    }
+
+    return decode_frame_at_time_req(env, context, time_us, dst_width, dst_height);
+}
+
+extern "C"
+JNIEXPORT jobject JNICALL
 Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeGetFrameAtIndex(
         JNIEnv *env,
         jobject thiz,
@@ -467,4 +678,28 @@ Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeRele
     }
 
     free(context);
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeCreateFromUrl(
+        JNIEnv *env,
+        jobject thiz,
+        jstring url,
+        jstring headers) {
+    const char *urlStr = env->GetStringUTFChars(url, nullptr);
+    const char *headersStr = env->GetStringUTFChars(headers, nullptr);
+    jlong handle = create_context_from_url(urlStr, headersStr);
+    env->ReleaseStringUTFChars(url, urlStr);
+    env->ReleaseStringUTFChars(headers, headersStr);
+    return handle;
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_io_github_anilbeesetti_nextlib_mediainfo_MediaThumbnailRetriever_nativeGetDurationUs(
+        JNIEnv *env, jobject thiz, jlong handle) {
+    auto *context = context_from_handle(handle);
+    if (!context || !context->formatContext) return 0L;
+    return context->formatContext->duration;
 }

@@ -50,6 +50,18 @@ class MediaThumbnailRetriever : Closeable {
         }
     }
 
+    fun setDataSource(url: String, headers: Map<String, String> = emptyMap()) {
+        reset()
+        val headersStr = headers.entries.joinToString("\r\n", postfix = "\r\n") { "${it.key}: ${it.value}" }
+        nativeHandle = nativeCreateFromUrl(url, headersStr)
+        require(nativeHandle != 0L) { "Unable to open media source from url." }
+    }
+
+    fun getDurationUs(): Long {
+        val handle = requireHandle()
+        return nativeGetDurationUs(handle)
+    }
+
     fun getEmbeddedPicture(): ByteArray? {
         val handle = requireHandle()
         return nativeGetEmbeddedPicture(handle)
@@ -62,6 +74,13 @@ class MediaThumbnailRetriever : Closeable {
         require(timeUs >= 0) { "timeUs must be >= 0" }
         val handle = requireHandle()
         val bitmap = nativeGetFrameAtTime(handle, timeUs) ?: return null
+        return bitmap.rotate(nativeGetRotationDegrees(handle))
+    }
+
+    fun getFrameAtTimeReq(timeUs: Long, dstWidth: Int = 0, dstHeight: Int = 0): Bitmap? {
+        require(timeUs >= 0) { "timeUs must be >= 0" }
+        val handle = requireHandle()
+        val bitmap = nativeGetFrameAtTimeReq(handle, timeUs, dstWidth, dstHeight) ?: return null
         return bitmap.rotate(nativeGetRotationDegrees(handle))
     }
 
@@ -118,6 +137,10 @@ class MediaThumbnailRetriever : Closeable {
 
         @Keep
         @JvmStatic
+        private external fun nativeGetFrameAtTimeReq(handle: Long, timeUs: Long, dstWidth: Int, dstHeight: Int): Bitmap?
+
+        @Keep
+        @JvmStatic
         private external fun nativeGetFrameAtIndex(handle: Long, frameIndex: Int): Bitmap?
 
         @Keep
@@ -127,6 +150,14 @@ class MediaThumbnailRetriever : Closeable {
         @Keep
         @JvmStatic
         private external fun nativeRelease(handle: Long)
+
+        @Keep
+        @JvmStatic
+        private external fun nativeCreateFromUrl(url: String, headers: String): Long
+
+        @Keep
+        @JvmStatic
+        private external fun nativeGetDurationUs(handle: Long): Long
     }
 }
 
