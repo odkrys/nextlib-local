@@ -88,25 +88,42 @@ struct JniContext {
     }
 
     bool MaybeAcquireNativeWindow(JNIEnv *env, jobject new_surface) {
-        if (surface == new_surface) {
-            return true;
+        //if (surface == new_surface) {
+        //    return true;
+        if (new_surface == nullptr) {
+            return false;
         }
+
+        if (env->IsSameObject(surface, new_surface)) {
+            return native_window != nullptr;
+        }
+
         if (native_window) {
             if (connected_as_cpu) {
                 native_window_api_disconnect(native_window, NATIVE_WINDOW_API_CPU);
                 connected_as_cpu = false;
             }
             ANativeWindow_release(native_window);
+            native_window = nullptr;
         }
+
+        if (surface) {
+            env->DeleteGlobalRef(surface);
+            surface = nullptr;
+        }
+
         native_window_width = 0;
         native_window_height = 0;
+
         native_window = ANativeWindow_fromSurface(env, new_surface);
         if (native_window == nullptr) {
             LOGE("kJniStatusANativeWindowError");
-            surface = nullptr;
+            //surface = nullptr;
             return false;
         }
-        surface = new_surface;
+        //surface = new_surface;
+
+        surface = env->NewGlobalRef(new_surface);
         return true;
     }
 
@@ -209,10 +226,26 @@ JNIEXPORT void JNICALL
 Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpegRelease(JNIEnv *env, jobject thiz,
                                                                               jlong jContext) {
     auto *const jniContext = reinterpret_cast<JniContext *>(jContext);
+/*
     AVCodecContext *context = jniContext->codecContext;
     if (context) {
         sws_freeContext(jniContext->swsContext);
         releaseContext(context);
+        delete jniContext;
+    }
+*/
+    if (jniContext) {
+        AVCodecContext *context = jniContext->codecContext;
+        if (context) {
+            sws_freeContext(jniContext->swsContext);
+            releaseContext(context);
+        }
+
+        if (jniContext->surface) {
+            env->DeleteGlobalRef(jniContext->surface);
+            jniContext->surface = nullptr;
+        }
+
         delete jniContext;
     }
 }
@@ -264,6 +297,9 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     ANativeWindow_Buffer native_window_buffer;
     int result = ANativeWindow_lock(jniContext->native_window, &native_window_buffer, nullptr);
     if (result == -19) {
+        if (jniContext->surface) {
+            env->DeleteGlobalRef(jniContext->surface);
+        }
         jniContext->surface = nullptr;
         return VIDEO_DECODER_SUCCESS;
     } else if (result || native_window_buffer.bits == nullptr) {
@@ -349,6 +385,7 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     AVCodecContext *avContext = jniContext->codecContext;
 
     auto *inputBuffer = (uint8_t *) env->GetDirectBufferAddress(encoded_data);
+/*
     AVPacket packet = *av_packet_alloc();
     packet.data = inputBuffer;
     packet.size = length;
@@ -357,6 +394,20 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     // Queue input data.
     int result = avcodec_send_packet(avContext, &packet);
     av_packet_unref(&packet);
+*/
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) {
+        return VIDEO_DECODER_ERROR_OTHER;
+    }
+
+    packet->data = inputBuffer;
+    packet->size = length;
+    packet->pts = input_time;
+
+    int result = avcodec_send_packet(avContext, packet);
+
+    av_packet_free(&packet);
+
     if (result) {
         logError("avcodec_send_packet", result);
         if (result == AVERROR_INVALIDDATA) {
@@ -416,9 +467,11 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
             0);
     if (env->ExceptionCheck()) {
         // Exception is thrown in Java when returning from the native call.
+        av_frame_free(&frame);
         return VIDEO_DECODER_ERROR_OTHER;
     }
     if (!init_result) {
+        av_frame_free(&frame);
         return VIDEO_DECODER_ERROR_OTHER;
     }
 
