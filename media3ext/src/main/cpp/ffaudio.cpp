@@ -153,6 +153,13 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
             resampleContext = (SwrContext *) context->opaque;
         } else {
             resampleContext = swr_alloc();
+
+            if (!resampleContext) {
+                LOGE("Failed to allocate SwrContext.");
+                av_frame_free(&frame);
+                return AUDIO_DECODER_ERROR_OTHER;
+            }
+
             av_opt_set_chlayout(resampleContext, "in_chlayout", &channelLayout, 0);
             av_opt_set_chlayout(resampleContext, "out_chlayout", &channelLayout, 0);
             av_opt_set_int(resampleContext, "in_sample_rate", sampleRate, 0);
@@ -165,6 +172,7 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
             if (result < 0) {
                 logError("swr_init", result);
                 av_frame_free(&frame);
+                swr_free(&resampleContext);
                 return transformError(result);
             }
             context->opaque = resampleContext;
@@ -185,22 +193,27 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
                 av_frame_free(&frame);
                 return AUDIO_DECODER_ERROR_OTHER;
             }
+            outputBuffer += outSize;
         }
-        result = swr_convert(resampleContext, &outputBuffer, bufferOutSize,
+        //result = swr_convert(resampleContext, &outputBuffer, bufferOutSize,
+        result = swr_convert(resampleContext, &outputBuffer, outSamples,
                              (const uint8_t **) frame->data, frame->nb_samples);
         av_frame_free(&frame);
         if (result < 0) {
             logError("swr_convert", result);
             return AUDIO_DECODER_ERROR_INVALID_DATA;
         }
+        int actualOutSize = result * channelCount * outSampleSize;
         int available = swr_get_out_samples(resampleContext, 0);
         if (available != 0) {
             LOGE("Expected no samples remaining after resampling, but found %d.",
                  available);
             return AUDIO_DECODER_ERROR_INVALID_DATA;
         }
-        outputBuffer += bufferOutSize;
-        outSize += bufferOutSize;
+        //outputBuffer += bufferOutSize;
+        //outSize += bufferOutSize;
+        outputBuffer += actualOutSize;
+        outSize += actualOutSize;
     }
     return outSize;
 }
@@ -313,14 +326,16 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegAudioDecoder_ffmpe
     if (codecId == AV_CODEC_ID_TRUEHD) {
         // Release and recreate the context if the codec is TrueHD.
         // TODO: Figure out why flushing doesn't work for this codec.
+        auto outputFloat =
+                (jboolean) (context->request_sample_fmt == OUTPUT_FORMAT_PCM_FLOAT);
         releaseContext(context);
         auto *codec = const_cast<AVCodec *>(avcodec_find_decoder(codecId));
         if (!codec) {
             LOGE("Unexpected error finding codec %d.", codecId);
             return 0L;
         }
-        auto outputFloat =
-                (jboolean) (context->request_sample_fmt == OUTPUT_FORMAT_PCM_FLOAT);
+        //auto outputFloat =
+        //        (jboolean) (context->request_sample_fmt == OUTPUT_FORMAT_PCM_FLOAT);
         return (jlong) createContext(env, codec, extra_data, outputFloat,
                 /* rawSampleRate= */ -1,
                 /* rawChannelCount= */ -1);
