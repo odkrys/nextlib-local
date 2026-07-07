@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <queue>
 #include <unistd.h>
+#include <android/api-level.h>
+#include <android/data_space.h>  // API 28+
 #include "ffcommon.h"
 
 extern "C" {
@@ -294,7 +296,9 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
                                                                                   jobject surface,
                                                                                   jobject output_buffer,
                                                                                   jint displayed_width,
-                                                                                  jint displayed_height) {
+                                                                                  //jint displayed_height) {
+                                                                                  jint displayed_height,
+                                                                                  jint color_transfer) {
     auto *const jniContext = reinterpret_cast<JniContext *>(jContext);
     if (!jniContext->MaybeAcquireNativeWindow(env, surface)) {
         return VIDEO_DECODER_ERROR_OTHER;
@@ -332,6 +336,22 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
             return VIDEO_DECODER_ERROR_OTHER;
         }
         jniContext->swsContext = swsContext;
+    }
+
+    if (android_get_device_api_level() >= 28) {
+        int32_t dataspace = ADATASPACE_UNKNOWN;
+
+
+        if (color_transfer == 6 || jniContext->codecContext->color_trc == AVCOL_TRC_SMPTE2084) {
+            dataspace = ADATASPACE_BT2020_PQ;
+        } else if (color_transfer == 7 || jniContext->codecContext->color_trc == AVCOL_TRC_ARIB_STD_B67) {
+            dataspace = ADATASPACE_BT2020_HLG;
+        } else if (jniContext->codecContext->color_primaries == AVCOL_PRI_BT2020 ||
+                   jniContext->codecContext->colorspace == AVCOL_SPC_BT2020_NCL) {
+            dataspace = ADATASPACE_BT2020;
+        }
+
+        ANativeWindow_setBuffersDataSpace(jniContext->native_window, dataspace);
     }
 
     ANativeWindow_Buffer native_window_buffer;
@@ -557,6 +577,16 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
 
     AVFrame *frame = jniContext->frame_queue.front();
     jniContext->frame_queue.pop();
+
+    if (frame->color_trc != AVCOL_TRC_UNSPECIFIED) {
+        jniContext->codecContext->color_trc = frame->color_trc;
+    }
+    if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED) {
+        jniContext->codecContext->color_primaries = frame->color_primaries;
+    }
+    if (frame->colorspace != AVCOL_SPC_UNSPECIFIED) {
+        jniContext->codecContext->colorspace = frame->colorspace;
+    }
 
     if (decode_only) {
         av_frame_free(&frame);

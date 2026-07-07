@@ -197,9 +197,14 @@ final class FfmpegVideoDecoder extends
         if (outputBuffer.mode != C.VIDEO_OUTPUT_MODE_SURFACE_YUV) {
             throw new FfmpegDecoderException("Invalid output mode.");
         }
+        int colorTransfer = Format.NO_VALUE;
+        if (outputBuffer.format != null && outputBuffer.format.colorInfo != null) {
+            colorTransfer = outputBuffer.format.colorInfo.colorTransfer;
+        }
         if (ffmpegRenderFrame(
                 nativeContext, surface,
-                outputBuffer, outputBuffer.width, outputBuffer.height) == VIDEO_DECODER_ERROR_OTHER) {
+                //outputBuffer, outputBuffer.width, outputBuffer.height) == VIDEO_DECODER_ERROR_OTHER) {
+                outputBuffer, outputBuffer.width, outputBuffer.height, colorTransfer) == VIDEO_DECODER_ERROR_OTHER) {
             throw new FfmpegDecoderException("Buffer render error: ");
         }
     }
@@ -213,7 +218,9 @@ final class FfmpegVideoDecoder extends
     private native int ffmpegRenderFrame(
             long context, Surface surface, VideoDecoderOutputBuffer outputBuffer,
             int displayedWidth,
-            int displayedHeight);
+            //int displayedHeight);
+            int displayedHeight,
+            int colorTransfer);
 
     /**
      * Decodes the encoded data passed.
