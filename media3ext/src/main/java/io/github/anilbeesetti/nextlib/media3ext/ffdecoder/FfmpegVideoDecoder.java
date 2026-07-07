@@ -88,6 +88,12 @@ final class FfmpegVideoDecoder extends
             case MimeTypes.VIDEO_H265 -> {
                 return initializationData.get(0);
             }
+            case MimeTypes.VIDEO_VP9 -> {
+                return initializationData.get(0);
+            }
+            case MimeTypes.VIDEO_AV1 -> {
+                return initializationData.get(0);
+            }
             default -> {
                 // Other codecs do not require extra data.
                 return null;
@@ -160,9 +166,10 @@ final class FfmpegVideoDecoder extends
 
         if (getFrameResult == VIDEO_DECODER_ERROR_INVALID_DATA) {
             outputBuffer.shouldBeSkipped = true;
-        }
+        //}
 
-        if (!decodeOnly) {
+        //if (!decodeOnly) {
+        } else if (!decodeOnly) {
             outputBuffer.format = inputBuffer.format;
         }
 

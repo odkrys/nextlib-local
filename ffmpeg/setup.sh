@@ -3,7 +3,8 @@
 # Versions
 VPX_VERSION=1.13.0
 MBEDTLS_VERSION=3.4.1
-FFMPEG_VERSION=6.0
+DAV1D_VERSION=1.5.3
+FFMPEG_VERSION=6.1.6
 
 # Directories
 BASE_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -13,11 +14,14 @@ SOURCES_DIR=$BASE_DIR/sources
 FFMPEG_DIR=$SOURCES_DIR/ffmpeg-$FFMPEG_VERSION
 VPX_DIR=$SOURCES_DIR/libvpx-$VPX_VERSION
 MBEDTLS_DIR=$SOURCES_DIR/mbedtls-$MBEDTLS_VERSION
+DAV1D_DIR=$SOURCES_DIR/dav1d-$DAV1D_VERSION
 
 # Configuration
-ANDROID_ABIS="x86 x86_64 armeabi-v7a arm64-v8a"
+#ANDROID_ABIS="x86 x86_64 armeabi-v7a arm64-v8a"
+ANDROID_ABIS="armeabi-v7a arm64-v8a"
 ANDROID_PLATFORM=21
-ENABLED_DECODERS="vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd h264 hevc mpeg2video mpegvideo libvpx_vp8 libvpx_vp9"
+#ENABLED_DECODERS="vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd h264 hevc mpeg2video mpegvideo libvpx_vp8 libvpx_vp9"
+ENABLED_DECODERS="vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd h264 hevc mpeg2video mpegvideo vp9 libdav1d"
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || sysctl -n hw.pysicalcpu || echo 4)
 
 # Set up host platform variables
@@ -36,23 +40,36 @@ esac
 # Build tools
 TOOLCHAIN_PREFIX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${HOST_PLATFORM}"
 CMAKE_EXECUTABLE="${ANDROID_SDK_HOME}/cmake/${ANDROID_CMAKE_VERSION}/bin/cmake"
+# Using Build machine's Ninja. It is used for libdav1d building. Needs to be installed
+NINJA_EXECUTABLE=$(which ninja)
+# Meson is used for libdav1d building. Needs to be installed
+MESON_EXECUTABLE=$(which meson)
+# Nasm is used for libdav1d building. Needs to be installed
+NASM_EXECUTABLE=$(which nasm)
+
+export FAM_CC=${TOOLCHAIN_PREFIX}/bin/${TARGET}-clang
+export FAM_CXX=${FAM_CC}++
+export FAM_LD=${FAM_CC}
+# Forcing FFmpeg and its dependencies to look for dependencies
+# in a specific directory when pkg-config is used
+export PKG_CONFIG_LIBDIR=$BUILD_DIR/external/lib/pkgconfig
 
 # Check if sdkmanager is in PATH
-if command -v sdkmanager &> /dev/null; then
-  # Use sdkmanager from PATH
-  echo "Using sdkmanager from PATH"
-  echo y | sdkmanager --sdk_root="${ANDROID_SDK_HOME}" "cmake;${ANDROID_CMAKE_VERSION}"
-else
-  # Use sdkmanager from Android SDK
-  SDKMANAGER_EXECUTABLE="${ANDROID_SDK_HOME}/cmdline-tools/latest/bin/sdkmanager"
-  if [[ -x "$SDKMANAGER_EXECUTABLE" ]]; then
-    echo "Using sdkmanager from Android SDK"
-    echo y | "$SDKMANAGER_EXECUTABLE" --sdk_root="${ANDROID_SDK_HOME}" "cmake;${ANDROID_CMAKE_VERSION}"
-  else
-    echo "Error: sdkmanager not found in PATH or Android SDK"
-    exit 1
-  fi
-fi
+#if command -v sdkmanager &> /dev/null; then
+#  # Use sdkmanager from PATH
+#  echo "Using sdkmanager from PATH"
+#  echo y | sdkmanager --sdk_root="${ANDROID_SDK_HOME}" "cmake;${ANDROID_CMAKE_VERSION}"
+#else
+#  # Use sdkmanager from Android SDK
+#  SDKMANAGER_EXECUTABLE="${ANDROID_SDK_HOME}/cmdline-tools/latest/bin/sdkmanager"
+#  if [[ -x "$SDKMANAGER_EXECUTABLE" ]]; then
+#    echo "Using sdkmanager from Android SDK"
+#    echo y | "$SDKMANAGER_EXECUTABLE" --sdk_root="${ANDROID_SDK_HOME}" "cmake;${ANDROID_CMAKE_VERSION}"
+#  else
+#    echo "Error: sdkmanager not found in PATH or Android SDK"
+#    exit 1
+#  fi
+#fi
 
 mkdir -p $SOURCES_DIR
 
@@ -78,6 +95,17 @@ function downloadMbedTLS() {
   popd
 }
 
+function downloadDav1d() {
+    pushd $SOURCES_DIR
+    echo "Downloading Dav1d source code of version $DAV1D_VERSION..."
+    DAV1D_FILE=dav1d-$DAV1D_VERSION.tar.gz
+    curl -L "https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/dav1d-${DAV1D_VERSION}.tar.gz" -o $DAV1D_FILE
+    [ -e $DAV1D_FILE ] || { echo "$DAV1D_FILE does not exist. Exiting..."; exit 1; }
+    tar -zxf $DAV1D_FILE
+    rm $DAV1D_FILE
+    popd
+}
+
 function downloadFfmpeg() {
   pushd $SOURCES_DIR
   echo "Downloading FFmpeg source code of version $FFMPEG_VERSION..."
@@ -86,6 +114,24 @@ function downloadFfmpeg() {
   [ -e $FFMPEG_FILE ] || { echo "$FFMPEG_FILE does not exist. Exiting..."; exit 1; }
   tar -zxf $FFMPEG_FILE
   rm $FFMPEG_FILE
+  popd
+}
+
+function patchFfmpeg() {
+  pushd $FFMPEG_DIR
+  echo "Applying patches to FFmpeg..."
+
+  PATCH_FILE=$BASE_DIR/patches/libdav1d-clear-buffered-data.patch
+
+  if [ -f "$PATCH_FILE" ]; then
+    patch -p1 --forward --batch -i "$PATCH_FILE" || {
+      echo "Warning: failed to apply $PATCH_FILE (may already be applied, or context mismatch)"
+    }
+  else
+    echo "Patch file not found: $PATCH_FILE"
+    exit 1
+  fi
+
   popd
 }
 
@@ -178,6 +224,79 @@ function buildMbedTLS() {
     popd
 }
 
+function buildDav1d() {
+    pushd $DAV1D_DIR
+
+    for ABI in $ANDROID_ABIS; do
+      CPU_FAMILY=
+      case $ABI in
+        armeabi-v7a)
+          TARGET_TRIPLE_MACHINE_ARCH=arm
+          TOOLCHAIN=armv7a-linux-androideabi21-
+          ;;
+        arm64-v8a)
+          TARGET_TRIPLE_MACHINE_ARCH=aarch64
+          TOOLCHAIN=aarch64-linux-android21-
+          ;;
+        x86)
+          TARGET_TRIPLE_MACHINE_ARCH=i686
+          TOOLCHAIN=i686-linux-android21-
+          CPU_FAMILY=x86
+          ;;
+        x86_64)
+          TARGET_TRIPLE_MACHINE_ARCH=x86_64
+          TOOLCHAIN=x86_64-linux-android21-
+          ;;
+      esac
+
+      CROSS_PREFIX_WITH_PATH=${TOOLCHAIN_PREFIX}/bin/llvm-
+
+      [ -z "${CPU_FAMILY}" ] && CPU_FAMILY=${TARGET_TRIPLE_MACHINE_ARCH}
+
+      CROSS_FILE_NAME=crossfile-${ABI}.meson
+
+      echo "
+      [binaries]
+      c = '${TOOLCHAIN_PREFIX}/bin/${TOOLCHAIN}clang'
+      ar = '${CROSS_PREFIX_WITH_PATH}ar'
+      strip = '${CROSS_PREFIX_WITH_PATH}strip'
+      nasm = '${NASM_EXECUTABLE}'
+      pkg-config = '$(which pkg-config)'
+      [properties]
+      needs_exe_wrapper = true
+      sys_root = '${TOOLCHAIN_PREFIX}/sysroot'
+      [host_machine]
+      system = 'linux'
+      cpu_family = '${CPU_FAMILY}'
+      cpu = '${TARGET_TRIPLE_MACHINE_ARCH}'
+      endian = 'little'
+      [built-in options]
+      prefix = '$BUILD_DIR/external/$ABI'" > "${CROSS_FILE_NAME}"
+
+      BUILD_DIRECTORY=build/${ABI}
+
+      rm -rf ${BUILD_DIRECTORY}
+
+      ${MESON_EXECUTABLE} setup . ${BUILD_DIRECTORY} \
+        --cross-file ${CROSS_FILE_NAME} \
+        --default-library=static \
+        -Denable_asm=true \
+        -Denable_tools=false \
+        -Denable_tests=false \
+        -Denable_examples=false \
+        -Dtestdata_tests=false
+
+      pushd ${BUILD_DIRECTORY}
+
+      ${NINJA_EXECUTABLE} -j$JOBS
+      ${NINJA_EXECUTABLE} install
+
+      popd
+
+    done
+    popd
+}
+
 function buildFfmpeg() {
   pushd $FFMPEG_DIR
   EXTRA_BUILD_CONFIGURATION_FLAGS=""
@@ -220,6 +339,10 @@ function buildFfmpeg() {
       ;;
     esac
 
+    # Forcing FFmpeg and its dependencies to look for dependencies
+    # in a specific directory when pkg-config is used
+    export PKG_CONFIG_LIBDIR=$BUILD_DIR/external/$ABI/lib/pkgconfig
+
     # Referencing dependencies without pkgconfig
     DEP_CFLAGS="-I$BUILD_DIR/external/$ABI/include"
     DEP_LD_FLAGS="-L$BUILD_DIR/external/$ABI/lib"
@@ -230,6 +353,8 @@ function buildFfmpeg() {
       --enable-cross-compile \
       --arch=$ARCH \
       --cpu=$CPU \
+      --cc="${TOOLCHAIN_PREFIX}/bin/${TOOLCHAIN}clang" \
+      --cxx="${TOOLCHAIN_PREFIX}/bin/${TOOLCHAIN}clang++" \
       --cross-prefix="${TOOLCHAIN_PREFIX}/bin/$TOOLCHAIN" \
       --nm="${TOOLCHAIN_PREFIX}/bin/llvm-nm" \
       --ar="${TOOLCHAIN_PREFIX}/bin/llvm-ar" \
@@ -254,7 +379,7 @@ function buildFfmpeg() {
       --enable-demuxers \
       --enable-swresample \
       --enable-avformat \
-      --enable-libvpx \
+      --enable-libdav1d \
       --enable-protocol=file,http,https,mmsh,mmst,pipe,rtmp,rtmps,rtmpt,rtmpts,rtp,tls \
       --enable-version3 \
       --enable-mbedtls \
@@ -288,17 +413,24 @@ if [[ ! -d "$OUTPUT_DIR" && ! -d "$BUILD_DIR" ]]; then
   fi
 
   # Download Vpx source code if it doesn't exist
-  if [[ ! -d "$VPX_DIR" ]]; then
-    downloadLibVpx
+  #if [[ ! -d "$VPX_DIR" ]]; then
+  #  downloadLibVpx
+  #fi
+
+  # Download Dav1d source code if it doesn't exist
+  if [[ ! -d "$DAV1D_DIR" ]]; then
+    downloadDav1d
   fi
 
   # Download Ffmpeg source code if it doesn't exist
   if [[ ! -d "$FFMPEG_DIR" ]]; then
     downloadFfmpeg
+    patchFfmpeg
   fi
 
   # Building library
   buildMbedTLS
-  buildLibVpx
+  #buildLibVpx
+  buildDav1d
   buildFfmpeg
 fi

@@ -28,7 +28,8 @@ public final class FfmpegVideoRenderer extends DecoderVideoRenderer {
     private static final String TAG = "FfmpegVideoRenderer";
 
     private static final int DEFAULT_NUM_OF_INPUT_BUFFERS = 4;
-    private static final int DEFAULT_NUM_OF_OUTPUT_BUFFERS = 4;
+    //private static final int DEFAULT_NUM_OF_OUTPUT_BUFFERS = 4;
+    private static final int DEFAULT_NUM_OF_OUTPUT_BUFFERS = 2;
     /* Default size based on 720p resolution video compressed by a factor of two. */
     private static final int DEFAULT_INPUT_BUFFER_SIZE =
             Util.ceilDivide(1280, 64) * Util.ceilDivide(720, 64) * (64 * 64 * 3 / 2) / 2;

@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <android/native_window_jni.h>
 #include <algorithm>
+#include <queue>
+#include <unistd.h>
 #include "ffcommon.h"
 
 extern "C" {
@@ -79,6 +81,12 @@ const int kImageFormatYV12 = 0x32315659;
 
 struct JniContext {
     ~JniContext() {
+        while (!frame_queue.empty()) {
+            AVFrame* f = frame_queue.front();
+            av_frame_free(&f);
+            frame_queue.pop();
+        }
+
         if (native_window) {
             if (connected_as_cpu) {
                 native_window_api_disconnect(native_window, NATIVE_WINDOW_API_CPU);
@@ -141,6 +149,7 @@ struct JniContext {
     int native_window_width = 0;
     int native_window_height = 0;
     bool connected_as_cpu = false;
+    std::queue<AVFrame*> frame_queue;
 };
 
 JniContext *createVideoContext(JNIEnv *env,
@@ -164,16 +173,38 @@ JniContext *createVideoContext(JNIEnv *env,
             releaseContext(codecContext);
             return nullptr;
         }
+        memset(codecContext->extradata + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
         env->GetByteArrayRegion(extraData, 0, size, (jbyte *) codecContext->extradata);
     }
 
-    codecContext->thread_count = threads;
+    //codecContext->thread_count = threads;
+
+    AVDictionary *opts = nullptr;
+    if (strcmp(codec->name, "libdav1d") == 0) {
+        av_dict_set_int(&opts, "framethreads", 1, 0);
+        av_dict_set_int(&opts, "tilethreads", threads, 0);
+    } else {
+        codecContext->thread_count = threads;
+        codecContext->thread_type = FF_THREAD_FRAME;
+    }
     codecContext->err_recognition = AV_EF_IGNORE_ERR;
-    int result = avcodec_open2(codecContext, codec, nullptr);
+    //int result = avcodec_open2(codecContext, codec, nullptr);
+
+    int result = avcodec_open2(codecContext, codec, &opts);
+    av_dict_free(&opts);
+
+
     if (result < 0) {
         logError("avcodec_open2", result);
         releaseContext(codecContext);
         return nullptr;
+    }
+
+    if (strcmp(codec->name, "libdav1d") == 0) {
+        int64_t appliedFrameThreads = -1, appliedTileThreads = -1;
+        av_opt_get_int(codecContext->priv_data, "framethreads", 0, &appliedFrameThreads);
+        av_opt_get_int(codecContext->priv_data, "tilethreads", 0, &appliedTileThreads);
     }
 
     jniContext->codecContext = codecContext;
@@ -218,6 +249,11 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     }
 
     avcodec_flush_buffers(context);
+    while (!jniContext->frame_queue.empty()) {
+        AVFrame* f = jniContext->frame_queue.front();
+        av_frame_free(&f);
+        jniContext->frame_queue.pop();
+    }
     return (jlong) jniContext;
 }
 
@@ -266,6 +302,10 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
 
     if (jniContext->native_window_width != displayed_width ||
         jniContext->native_window_height != displayed_height) {
+
+        if (jniContext->swsContext) {
+            sws_freeContext(jniContext->swsContext);
+        }
 
         if (ANativeWindow_setBuffersGeometry(
                 jniContext->native_window,
@@ -394,20 +434,6 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     // Queue input data.
     int result = avcodec_send_packet(avContext, &packet);
     av_packet_unref(&packet);
-*/
-    AVPacket *packet = av_packet_alloc();
-    if (!packet) {
-        return VIDEO_DECODER_ERROR_OTHER;
-    }
-
-    packet->data = inputBuffer;
-    packet->size = length;
-    packet->pts = input_time;
-
-    int result = avcodec_send_packet(avContext, packet);
-
-    av_packet_free(&packet);
-
     if (result) {
         logError("avcodec_send_packet", result);
         if (result == AVERROR_INVALIDDATA) {
@@ -421,6 +447,57 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
         }
     }
     return result;
+*/
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) {
+        return VIDEO_DECODER_ERROR_OTHER;
+    }
+
+    packet->data = inputBuffer;
+    packet->size = length;
+    packet->pts = input_time;
+
+    int result = avcodec_send_packet(avContext, packet);
+
+    const int MAX_SEND_ATTEMPTS = 32;
+    int attempts = 0;
+
+    while (result == AVERROR(EAGAIN) && attempts < MAX_SEND_ATTEMPTS) {
+        AVFrame *frame = av_frame_alloc();
+        int recv_res = avcodec_receive_frame(avContext, frame);
+        if (recv_res == 0) {
+            jniContext->frame_queue.push(frame);
+        } else {
+            av_frame_free(&frame);
+            break;
+        }
+        result = avcodec_send_packet(avContext, packet);
+        attempts++;
+    }
+
+    while (true) {
+        AVFrame *frame = av_frame_alloc();
+        int recv_res = avcodec_receive_frame(avContext, frame);
+        if (recv_res == 0) {
+            jniContext->frame_queue.push(frame);
+        } else {
+            av_frame_free(&frame);
+            break;
+        }
+    }
+
+    av_packet_free(&packet);
+
+    if (result && result != AVERROR_EOF) {
+        if (result == AVERROR_INVALIDDATA) return VIDEO_DECODER_ERROR_INVALID_DATA;
+        if (result == AVERROR(EAGAIN)) {
+            logError("avcodec_send_packet", result);
+            return VIDEO_DECODER_ERROR_OTHER;
+        }
+        logError("avcodec_send_packet", result);
+        return VIDEO_DECODER_ERROR_OTHER;
+    }
+    return VIDEO_DECODER_SUCCESS;
 }
 
 extern "C"
@@ -432,6 +509,7 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
                                                                                    jobject output_buffer,
                                                                                    jboolean decode_only) {
     auto *const jniContext = reinterpret_cast<JniContext *>(jContext);
+/*
     AVCodecContext *avContext = jniContext->codecContext;
 
     AVFrame *frame = av_frame_alloc();
@@ -467,10 +545,32 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
             0);
     if (env->ExceptionCheck()) {
         // Exception is thrown in Java when returning from the native call.
-        av_frame_free(&frame);
         return VIDEO_DECODER_ERROR_OTHER;
     }
     if (!init_result) {
+        return VIDEO_DECODER_ERROR_OTHER;
+    }
+*/
+    if (jniContext->frame_queue.empty()) {
+        return VIDEO_DECODER_ERROR_INVALID_DATA;
+    }
+
+    AVFrame *frame = jniContext->frame_queue.front();
+    jniContext->frame_queue.pop();
+
+    if (decode_only) {
+        av_frame_free(&frame);
+        return VIDEO_DECODER_ERROR_INVALID_DATA;
+    }
+
+    env->CallVoidMethod(output_buffer, jniContext->init_method, frame->pts, output_mode, nullptr);
+
+    const jboolean init_result = env->CallBooleanMethod(
+            output_buffer, jniContext->init_for_yuv_frame_method,
+            frame->width, frame->height,
+            frame->linesize[0], frame->linesize[1], 0);
+
+    if (env->ExceptionCheck() || !init_result) {
         av_frame_free(&frame);
         return VIDEO_DECODER_ERROR_OTHER;
     }
@@ -489,5 +589,6 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
 
     av_frame_free(&frame);
 
-    return result;
+    //return result;
+    return VIDEO_DECODER_SUCCESS;
 }
