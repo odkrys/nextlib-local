@@ -125,6 +125,8 @@ struct JniContext {
         native_window_width = 0;
         native_window_height = 0;
 
+        last_dataspace_requested = -1;
+
         native_window = ANativeWindow_fromSurface(env, new_surface);
         if (native_window == nullptr) {
             LOGE("kJniStatusANativeWindowError");
@@ -151,6 +153,7 @@ struct JniContext {
     int native_window_width = 0;
     int native_window_height = 0;
     bool connected_as_cpu = false;
+    int32_t last_dataspace_requested = -1;
     std::queue<AVFrame*> frame_queue;
 };
 
@@ -341,7 +344,6 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     if (android_get_device_api_level() >= 28) {
         int32_t dataspace = ADATASPACE_UNKNOWN;
 
-
         if (color_transfer == 6 || jniContext->codecContext->color_trc == AVCOL_TRC_SMPTE2084) {
             dataspace = ADATASPACE_BT2020_PQ;
         } else if (color_transfer == 7 || jniContext->codecContext->color_trc == AVCOL_TRC_ARIB_STD_B67) {
@@ -351,7 +353,15 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
             dataspace = ADATASPACE_BT2020;
         }
 
-        ANativeWindow_setBuffersDataSpace(jniContext->native_window, dataspace);
+        if (dataspace != jniContext->last_dataspace_requested) {
+            int32_t dsResult = ANativeWindow_setBuffersDataSpace(jniContext->native_window, dataspace);
+
+            if (dsResult != 0) {
+                LOGE("setBuffersDataSpace(%d) -> %d. Rejected. Falling back to UNKNOWN.", dataspace, dsResult);
+                ANativeWindow_setBuffersDataSpace(jniContext->native_window, ADATASPACE_UNKNOWN);
+            }
+            jniContext->last_dataspace_requested = dataspace;
+        }
     }
 
     ANativeWindow_Buffer native_window_buffer;
