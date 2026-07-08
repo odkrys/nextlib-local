@@ -9,6 +9,11 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("media3ext")
 
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+
+add_subdirectory(libyuv EXCLUDE_FROM_ALL)
+include_directories(libyuv/include)
+
 set(ffmpeg_dir ${CMAKE_SOURCE_DIR}/../../../../ffmpeg/output)
 set(ffmpeg_libs ${ffmpeg_dir}/lib/${ANDROID_ABI})
 
@@ -39,11 +44,10 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ffaudio.cpp
         ffvideo.cpp)
 
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
-
 target_link_libraries(${CMAKE_PROJECT_NAME}
         # List libraries link to the target library
         log
         android
         nativewindow
-        ${ffmpeg_libs_names})
+        ${ffmpeg_libs_names}
+        yuv)

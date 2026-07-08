@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <android/api-level.h>
 #include <android/data_space.h>  // API 28+
+#include <libyuv.h>
 #include "ffcommon.h"
 
 extern "C" {
@@ -428,10 +429,38 @@ Java_io_github_anilbeesetti_nextlib_media3ext_ffdecoder_FfmpegVideoDecoder_ffmpe
     //Perform color space conversion using sws_scale.
     //Convert the source data (src) with specified strides (src_stride) and displayed height,
     //and store the result in the destination data (dest) with corresponding strides (dest_stride).
+/*
     sws_scale(jniContext->swsContext,
               src, src_stride,
               0, displayed_height,
               dest, dest_stride);
+*/
+    if (jniContext->codecContext->pix_fmt == AV_PIX_FMT_YUV420P10LE) {
+        libyuv::I010ToI420(
+                reinterpret_cast<const uint16_t*>(src[0]), src_stride[0] / 2,
+                reinterpret_cast<const uint16_t*>(src[1]), src_stride[1] / 2,
+                reinterpret_cast<const uint16_t*>(src[2]), src_stride[2] / 2,
+                dest[0], dest_stride[0],
+                dest[1], dest_stride[1],
+                dest[2], dest_stride[2],
+                displayed_width, displayed_height);
+
+    } else if (jniContext->codecContext->pix_fmt == AV_PIX_FMT_YUV420P) {
+        libyuv::I420Copy(
+                src[0], src_stride[0],
+                src[1], src_stride[1],
+                src[2], src_stride[2],
+                dest[0], dest_stride[0],
+                dest[1], dest_stride[1],
+                dest[2], dest_stride[2],
+                displayed_width, displayed_height);
+
+    } else {
+        sws_scale(jniContext->swsContext,
+                  src, src_stride,
+                  0, displayed_height,
+                  dest, dest_stride);
+    }
 
     env->ReleaseIntArrayElements(*yuvStrides_array, yuvStrides, 0);
 
