@@ -1,5 +1,8 @@
 # NextLib
 
+git clone --recurse-submodules https://github.com/odkrys/nextlib-local
+
+
 [![Build nextlib](https://github.com/anilbeesetti/nextlib/actions/workflows/build.yaml/badge.svg)](https://github.com/anilbeesetti/nextlib/actions/workflows/build.yaml) [![Maven Central](https://img.shields.io/maven-central/v/io.github.anilbeesetti/nextlib-media3ext.svg?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.anilbeesetti/nextlib-media3ext)
 
 NextLib is a library for adding ffmpeg codecs to [Media3](https://github.com/androidx/media).
