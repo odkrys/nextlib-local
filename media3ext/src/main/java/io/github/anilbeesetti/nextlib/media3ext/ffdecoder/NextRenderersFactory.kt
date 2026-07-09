@@ -66,10 +66,26 @@ open class NextRenderersFactory(context: Context) : DefaultRenderersFactory(cont
         allowedVideoJoiningTimeMs: Long,
         out: ArrayList<Renderer>
     ) {
+        val av1CodecSelector = if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
+            mediaCodecSelector
+        } else {
+            MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+                val decoders = mediaCodecSelector.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+                decoders.filter { codecInfo ->
+                    if (mimeType == androidx.media3.common.MimeTypes.VIDEO_AV1) {
+                        codecInfo.hardwareAccelerated || codecInfo.name.contains("dav1d", ignoreCase = true)
+                    } else {
+                        true
+                    }
+                }
+            }
+        }
+
         super.buildVideoRenderers(
             context,
             extensionRendererMode,
-            mediaCodecSelector,
+            //mediaCodecSelector,
+            av1CodecSelector,
             enableDecoderFallback,
             eventHandler,
             eventListener,
