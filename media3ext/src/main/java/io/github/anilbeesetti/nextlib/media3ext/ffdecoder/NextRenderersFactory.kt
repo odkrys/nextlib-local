@@ -16,7 +16,11 @@ import io.github.anilbeesetti.nextlib.media3ext.renderer.NextTextRenderer
 
 
 @UnstableApi
-open class NextRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+//open class NextRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+open class NextRenderersFactory(
+    context: Context,
+    private val forceDolbyVisionFallback: Boolean
+) : DefaultRenderersFactory(context) {
 
     override fun buildAudioRenderers(
         context: Context,
@@ -66,11 +70,11 @@ open class NextRenderersFactory(context: Context) : DefaultRenderersFactory(cont
         allowedVideoJoiningTimeMs: Long,
         out: ArrayList<Renderer>
     ) {
-        val av1CodecSelector = if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
-            mediaCodecSelector
-        } else {
-            MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
-                val decoders = mediaCodecSelector.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+        val customCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+            val decoders = mediaCodecSelector.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
+            if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
+                decoders
+            } else {
                 decoders.filter { codecInfo ->
                     if (mimeType == androidx.media3.common.MimeTypes.VIDEO_AV1) {
                         codecInfo.hardwareAccelerated || codecInfo.name.contains("dav1d", ignoreCase = true)
@@ -85,13 +89,66 @@ open class NextRenderersFactory(context: Context) : DefaultRenderersFactory(cont
             context,
             extensionRendererMode,
             //mediaCodecSelector,
-            av1CodecSelector,
+            customCodecSelector,
             enableDecoderFallback,
             eventHandler,
             eventListener,
             allowedVideoJoiningTimeMs,
             out
         )
+
+        val defaultRendererIndex = out.indexOfFirst { it is androidx.media3.exoplayer.video.MediaCodecVideoRenderer }
+
+        if (defaultRendererIndex != -1) {
+            val customMediaCodecRenderer = object : androidx.media3.exoplayer.video.MediaCodecVideoRenderer(
+                context,
+                customCodecSelector,
+                allowedVideoJoiningTimeMs,
+                enableDecoderFallback,
+                eventHandler,
+                eventListener,
+                MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY
+            ) {
+                override fun supportsFormat(
+                    mediaCodecSelector: MediaCodecSelector,
+                    format: androidx.media3.common.Format
+                ): Int {
+                    val codecs = format.codecs
+                    val isProfile7 = codecs != null && (codecs.startsWith("dvhe.07") || codecs.startsWith("dvh1.07"))
+
+                    if (forceDolbyVisionFallback && format.sampleMimeType == androidx.media3.common.MimeTypes.VIDEO_DOLBY_VISION && isProfile7) {
+                        val fallbackFormat = format.buildUpon()
+                            .setSampleMimeType(androidx.media3.common.MimeTypes.VIDEO_H265)
+                            .setCodecs(null)
+                            .build()
+                        return super.supportsFormat(mediaCodecSelector, fallbackFormat)
+                    }
+                    return super.supportsFormat(mediaCodecSelector, format)
+                }
+
+                override fun getDecoderInfos(
+                    mediaCodecSelector: MediaCodecSelector,
+                    format: androidx.media3.common.Format,
+                    requiresSecureDecoder: Boolean
+                ): MutableList<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> {
+                    val codecs = format.codecs
+                    val isProfile7 = codecs != null && (codecs.startsWith("dvhe.07") || codecs.startsWith("dvh1.07"))
+
+                    if (forceDolbyVisionFallback && format.sampleMimeType == androidx.media3.common.MimeTypes.VIDEO_DOLBY_VISION && isProfile7) {
+                        Log.i(TAG, "Forcing Dolby Vision Profile 7 to HEVC for HDR10 Fallback")
+                        val fallbackFormat = format.buildUpon()
+                            .setSampleMimeType(androidx.media3.common.MimeTypes.VIDEO_H265)
+                            .setCodecs(null)
+                            .build()
+                        return super.getDecoderInfos(mediaCodecSelector, fallbackFormat, requiresSecureDecoder)
+                    }
+                    return super.getDecoderInfos(mediaCodecSelector, format, requiresSecureDecoder)
+                }
+            }
+
+            out.removeAt(defaultRendererIndex)
+            out.add(defaultRendererIndex, customMediaCodecRenderer)
+        }
 
         if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) return
 
